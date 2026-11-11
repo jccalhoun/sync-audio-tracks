@@ -42,6 +42,14 @@ PHASES = 512       # resampling filter sub-sample resolution
 CHUNK = 100_000    # samples resampled per batch (memory vs speed)
 
 
+def status(msg=""):
+    """Show progress on one line that keeps overwriting itself; status() clears it.
+    Does nothing when the output is not a terminal (e.g. redirected to a file)."""
+    if sys.stdout.isatty():
+        sys.stdout.write("\r" + msg.ljust(50) + ("" if msg else "\r"))
+        sys.stdout.flush()
+
+
 # ---------------------------------------------------------------- measuring
 
 def analysis_signal(x, sr):
@@ -183,6 +191,8 @@ def fit(t, d, n_out, sr, steady):
         if steady_run.mean() >= 0.7:
             keep[a:b + 1] = steady_run
             glitches.append((float(t[a]), float(t[b]), float(med)))
+    if not keep.any():  # nothing lines up consistently: report no match instead of guessing
+        return None
     tk, rk = t[keep], res[keep]
     local = runmed(rk, FOLLOW)
     shifts = [(float(tk[a]), float(tk[b]), float(np.median(local[a:b + 1])))
@@ -213,13 +223,15 @@ def build_table():
     return h / h.sum(axis=1, keepdims=True), k
 
 
-def warp(x, curve, n_out, table, k):
+def warp(x, curve, n_out, table, k, progress=None):
     """out[n] = x[n + d(n)], band-limited interpolation, per channel."""
     half = TAPS // 2
     n_in = len(x)
     xp = np.pad(x, ((half, half), (0, 0)))
     out = np.zeros((n_out, x.shape[1]))
     for n0 in range(0, n_out, CHUNK):
+        if progress:
+            progress(n0 / n_out)
         n = np.arange(n0, min(n0 + CHUNK, n_out), dtype=np.float64)
         p = n + curve(n)
         i = np.floor(p).astype(np.int64)
@@ -261,11 +273,13 @@ def main():
 
     info = sf.info(str(args.reference))
     sr = info.samplerate
+    status("Reading reference...")
     ref, _ = sf.read(str(args.reference), always_2d=True, dtype="float64")
     n_out = len(ref)
     ref_a = analysis_signal(ref, sr)
     del ref
     table, k = build_table()
+    status()
 
     lines = [f"Reference: {args.reference.name}  ({sr} Hz, {info.subtype}, {mmss(n_out, sr)})", ""]
     print(lines[0])
@@ -278,8 +292,10 @@ def main():
             msg = f"  SKIPPED: sample rate is {tinfo.samplerate} Hz but the reference is {sr} Hz."
             print(msg); lines += [path.name, msg, ""]; failed += 1
             continue
+        status("  reading...")
         x, _ = sf.read(str(path), always_2d=True, dtype="float64")
         trk_a = analysis_signal(x, sr)
+        status("  measuring...")
         starts, t1, d1, c1 = first_pass(ref_a, trk_a, sr, args.interval, args.max_offset)
         voiced, m = len(starts), None
         if len(t1):
@@ -290,16 +306,19 @@ def main():
             if len(t):
                 m = fit(t, d, n_out, sr, args.steady)
         if m is None:
+            status()
             msg = "  SKIPPED: could not find a reliable match with the reference."
             print(msg); lines += [path.name, msg, ""]; failed += 1
             continue
 
-        y = warp(x, m["curve"], n_out, table, k)
+        y = warp(x, m["curve"], n_out, table, k, progress=lambda done: status(f"  resampling... {done:.0%}"))
         flipped = pol < 0 and not args.no_flip
         if flipped:
             y = -y
         out_path = path.with_name(f"{path.stem}-{args.suffix}{path.suffix}")
+        status("  writing...")
         sf.write(str(out_path), y, sr, subtype=tinfo.subtype, format=tinfo.format)
+        status()
 
         ms = lambda s: s / sr * 1000
         how = {"follow": "clock drift + following your movement", "steady": "clock drift only (--steady)",

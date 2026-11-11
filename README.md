@@ -34,6 +34,8 @@ python micsync.py "Track 1_001.wav" "Track 2_001.wav" "Track 3_001.wav" "Track 4
 
 Put quotes around file names that contain spaces. Audition's default names do.
 
+While it runs, a status line shows what it's doing for each track (reading, measuring, then resampling with a percentage). Expect roughly 30 seconds per track for an 8-minute take.
+
 The reference is the mic every other track is matched to. Any mic works; the one you use most is a natural choice. All files must have the same sample rate.
 
 ### Options
@@ -78,6 +80,7 @@ Track 2_001.wav
 | measurements | How many one-second windows gave a usable match, and how consistent they were. Silent stretches aren't counted. |
 | NOTE | A stretch where the offset sat noticeably away from the drift line. This is usually you leaning or turning: about 1 ms is roughly 34 cm (a foot) of change in distance between two mics. If you didn't move, listen for a click where it starts, which would mean the device dropped a few samples. |
 | WARNING | Fewer than half the windows matched. Check that track by ear. |
+| SKIPPED | The track couldn't be matched to the reference at all (for example, a file from a different take), or its sample rate differs. No synced file is written for it. |
 
 ## How it works
 
