@@ -10,7 +10,12 @@ through the take, then resamples each track so it stays locked to the
 reference from start to end.
 
 Usage:
-    python micsync.py REFERENCE.wav MIC2.wav MIC3.wav MIC4.wav
+    python micsync.py                                   every WAV in this folder
+    python micsync.py FOLDER                            every WAV in FOLDER
+    python micsync.py REFERENCE.wav MIC2.wav MIC3.wav   named files
+
+With no file names, the first WAV in the folder (by name) is the reference
+and files already ending in -synced are ignored. Keep one take per folder.
 
 Output (originals are never changed):
     MIC2-synced.wav ...            same length, sample rate and format as REFERENCE
@@ -19,6 +24,8 @@ Output (originals are never changed):
 Needs:  pip install numpy scipy soundfile
 """
 import argparse
+import glob
+import re
 import sys
 import time
 from pathlib import Path
@@ -33,7 +40,7 @@ NEAR_S = 0.010     # normal search range around the predicted offset
 RETRY_S = 0.250    # wider search if the normal one fails (first pass only)
 MIN_CONF = 0.30    # minimum correlation (0..1) to accept a first-pass window
 MIN_CONF2 = 0.50   # minimum correlation to use a second-pass window
-TOL = 8.0          # samples: further than this from the steady-drift line counts as "shifted"
+TOL_S = 8 / 48000  # seconds (8 samples at 48 kHz): further than this from the drift line counts as "shifted"
 RUN = 5            # report a shift only if it lasts at least this many windows
 MOVE_S = 0.001     # offset changes up to this (seconds) are always followed; larger ones only if steady
 FOLLOW = 2         # follow the offset using the median of +/- this many neighbouring windows
@@ -166,49 +173,49 @@ def fit(t, d, n_out, sr, steady):
     """Turn the measurements into an offset curve d(n). Returns a dict."""
     if len(t) < 5:
         c0 = float(np.median(d))
-        return dict(slope=0.0, start=c0, end=c0, scatter=0.0, move=0.0, shifts=[], glitches=[],
+        return dict(slope=0.0, start=c0, end=c0, scatter=0.0, move=0.0, shifts=[],
                     used=len(t), mode="fixed", curve=lambda n: c0 + 0.0 * n)
+    tol = TOL_S * sr
     # steady clock drift: a straight line through the windows that agree with it
     lag = max(1, min(20, len(t) // 3))
     slope = float(np.median((d[lag:] - d[:-lag]) / (t[lag:] - t[:-lag])))
     icpt = float(np.median(d - slope * t))
     for _ in range(4):
-        inl = np.abs(d - (slope * t + icpt)) <= TOL
+        inl = np.abs(d - (slope * t + icpt)) <= tol
         if inl.sum() < 5:
             break
         slope, icpt = np.polyfit(t[inl], d[inl], 1)
     # What is left over, window by window:
     #   small  -> you moving relative to the mics: follow it
-    #   large but steady for a while -> dropped/repeated audio: follow it and warn
+    #   large but steady for a while -> a big move or dropped/repeated audio: follow it
     #   large and erratic -> not a real match (noises away from the mics): ignore
     res = d - (slope * t + icpt)
     bound = MOVE_S * sr
     keep = np.abs(res) <= bound
-    glitches = []
     for a, b in runs(~keep, RUN):
         med = np.median(res[a:b + 1])
-        steady_run = np.abs(res[a:b + 1] - med) <= TOL
+        steady_run = np.abs(res[a:b + 1] - med) <= tol
         if steady_run.mean() >= 0.7:
             keep[a:b + 1] = steady_run
-            glitches.append((float(t[a]), float(t[b]), float(med)))
     if not keep.any():  # nothing lines up consistently: report no match instead of guessing
         return None
     tk, rk = t[keep], res[keep]
     local = runmed(rk, FOLLOW)
     shifts = [(float(tk[a]), float(tk[b]), float(np.median(local[a:b + 1])))
-              for a, b in runs(np.abs(local) > TOL, RUN)]
-    small = np.abs(local) <= TOL
-    move = float(np.percentile(np.abs(local[small]), 95)) if small.any() else 0.0
+              for a, b in runs(np.abs(local) > tol, RUN)]
+    small = np.abs(local) <= tol
+    move = float(np.percentile(np.abs(local[small] if small.any() else local), 95))
     if steady:
         mode, curve = "steady", (lambda n: icpt + slope * n)
-        scatter = float(np.std(rk[np.abs(rk) <= TOL])) if (np.abs(rk) <= TOL).any() else 0.0
+        scatter = float(np.std(rk[np.abs(rk) <= tol])) if (np.abs(rk) <= tol).any() else 0.0
     else:
         at = np.concatenate([[0.0], tk, [float(n_out)]])
         ad = np.concatenate([[local[0]], local, [local[-1]]])
         mode, curve = "follow", (lambda n: icpt + slope * n + np.interp(n, at, ad))
-        scatter = float(np.std((rk - local)[np.abs(rk - local) <= TOL]))
+        close = np.abs(rk - local) <= tol
+        scatter = float(np.std((rk - local)[close])) if close.any() else 0.0
     return dict(slope=float(slope), start=float(curve(0.0)), end=float(curve(float(n_out))), scatter=scatter,
-                move=move, shifts=shifts, glitches=glitches, used=int(keep.sum()), mode=mode, curve=curve)
+                move=move, shifts=shifts, used=int(keep.sum()), mode=mode, curve=curve)
 
 
 # --------------------------------------------------------------- resampling
@@ -256,94 +263,158 @@ def mmss(samples, sr):
     return f"{int(s // 60)}:{s % 60:04.1f}"
 
 
+def natural_key(path):
+    """Sort 'Track 2' before 'Track 10'."""
+    return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", path.name)]
+
+
+def pick_files(args):
+    """Work out the reference and the other tracks from the command line.
+    Returns (reference, tracks, ignored, folder or None)."""
+    given, folder = list(args.files), None
+    if not given or (len(given) == 1 and given[0].is_dir()):
+        folder = given[0] if given else Path(".")
+        files = sorted((p for p in folder.iterdir() if p.is_file() and p.suffix.lower() == ".wav"), key=natural_key)
+    else:
+        files = []
+        for p in given:  # Windows does not expand *.wav itself, so do it here
+            wild = any(ch in str(p) for ch in "*?")
+            files += sorted((Path(m) for m in glob.glob(str(p))), key=natural_key) if wild else [p]
+        missing = [p for p in files if not p.is_file()]
+        if missing:
+            sys.exit("File not found: " + ", ".join(str(p) for p in missing)
+                     + "\nCheck the exact names (e.g. 'dir *.wav'), and put quotes around names with spaces.")
+    seen, unique = set(), []
+    for p in files:
+        if p.resolve() not in seen:
+            seen.add(p.resolve())
+            unique.append(p)
+    ignored = [p for p in unique if p.stem.endswith(f"-{args.suffix}")]
+    files = [p for p in unique if p not in ignored]
+    if len(files) < 2:
+        where = f"in {folder.resolve()}" if folder is not None else "on the command line"
+        sys.exit(f"Need a reference and at least one other WAV file, but found {len(files)} {where}"
+                 + (f" (not counting {len(ignored)} already ending in -{args.suffix})." if ignored else "."))
+    return files[0], files[1:], ignored, folder
+
+
+def sync_track(path, ref_a, n_out, sr, table, k, args):
+    """Sync one track and write it. Returns (ok, report lines)."""
+    t0 = time.time()
+    tinfo = sf.info(str(path))
+    if tinfo.samplerate != sr:
+        return False, [f"  SKIPPED: sample rate is {tinfo.samplerate} Hz but the reference is {sr} Hz."]
+    status("  reading...")
+    x, _ = sf.read(str(path), always_2d=True, dtype="float64")
+    if len(x) < WIN_S * sr:
+        return False, [f"  SKIPPED: the file is shorter than {WIN_S:g} second."]
+    trk_a = analysis_signal(x, sr)
+    status("  measuring...")
+    starts, t1, d1, c1 = first_pass(ref_a, trk_a, sr, args.interval, args.max_offset)
+    voiced, m = len(starts), None
+    if len(t1):
+        pol = -1 if np.sum(c1) < 0 else 1
+        same = np.sign(c1) == pol
+        rough = runmed(d1[same], 4)
+        t, d = second_pass(ref_a, trk_a, sr, starts, lambda n: np.interp(n, t1[same], rough), pol)
+        if len(t):
+            m = fit(t, d, n_out, sr, args.steady)
+    if m is None:
+        return False, ["  SKIPPED: could not find a reliable match with the reference.",
+                       f"           If this mic starts more than {args.max_offset:g} s before or after the reference,",
+                       "           try a larger --max-offset. Otherwise it may be from a different take."]
+
+    y = warp(x, m["curve"], n_out, table, k, progress=lambda done: status(f"  resampling... {done:.0%}"))
+    flipped = pol < 0 and not args.no_flip
+    if flipped:
+        y = -y
+    peak = float(np.max(np.abs(y))) if len(y) else 0.0
+    clipped = int(np.sum(np.abs(y) > 1.0)) if tinfo.subtype not in ("FLOAT", "DOUBLE") else 0
+    out_path = path.with_name(f"{path.stem}-{args.suffix}{path.suffix}")
+    status("  writing...")
+    sf.write(str(out_path), y, sr, subtype=tinfo.subtype, format=tinfo.format)
+
+    ms = lambda s: s / sr * 1000
+    how = {"follow": "clock drift + following your movement", "steady": "clock drift only (--steady)",
+           "fixed": "fixed offset (too little speech to measure drift)"}
+    rep = [
+        f"  start offset : {ms(m['start']):+.2f} ms ({m['start']:+.1f} samples)",
+        f"  end offset   : {ms(m['end']):+.2f} ms ({m['end']:+.1f} samples)",
+        f"  clock drift  : {ms(m['slope'] * n_out):+.2f} ms over the take ({m['slope'] * 1e6:+.2f} ppm)",
+        f"  movement     : offset wanders +/-{m['move']:.1f} samples around the drift line",
+        f"  polarity     : " + ("normal" if pol > 0 else "INVERTED" + (" (corrected)" if flipped else " (left as is)")),
+        f"  correction   : {how[m['mode']]}",
+        f"  measurements : {m['used']} of {voiced} windows used, scatter {m['scatter']:.1f} samples",
+    ]
+    for a, b, v in m["shifts"]:
+        rep.append(f"  NOTE: {mmss(a, sr)}-{mmss(b, sr)} offset shifted {v:+.0f} samples ({ms(v):+.2f} ms) from the drift line"
+                   + (" (not followed with --steady)" if m["mode"] == "steady" else " (followed)"))
+    if m["shifts"]:
+        rep.append("        Usually you moving relative to the mics. If you didn't move, check for a click where it starts.")
+    if m["used"] < voiced // 2:
+        rep.append("  WARNING: fewer than half the windows matched - check this track by ear")
+    if clipped:
+        rep.append(f"  WARNING: {clipped} sample(s) clipped: resampling raised the peak {20 * np.log10(peak):+.2f} dB over full scale,")
+        rep.append(f"           which a {tinfo.subtype} file cannot hold. Record a little quieter, or in 32-bit float.")
+    rep.append(f"  wrote        : {out_path.name}  ({time.time() - t0:.0f} s)")
+    return True, rep
+
+
 def main():
-    ap = argparse.ArgumentParser(description="Sync multiple mics of the same voice to a reference mic.")
-    ap.add_argument("reference", type=Path, help="the mic everything else is matched to")
-    ap.add_argument("tracks", type=Path, nargs="+", help="the other mic files")
+    ap = argparse.ArgumentParser(
+        description="Sync multiple mics of the same voice to a reference mic.",
+        epilog="With no files, every WAV in the current folder is used and the first by name is the reference.")
+    ap.add_argument("files", type=Path, nargs="*", metavar="FILE",
+                    help="reference mic first, then the other mics; or one folder; or nothing for the current folder")
     ap.add_argument("--interval", type=float, default=1.0, help="seconds between measurements (default 1)")
     ap.add_argument("--max-offset", type=float, default=1.0, help="largest start offset to search for, seconds (default 1)")
     ap.add_argument("--suffix", default="synced", help="added to output file names (default: synced)")
     ap.add_argument("--steady", action="store_true", help="correct clock drift only; do not follow offset changes caused by movement")
     ap.add_argument("--no-flip", action="store_true", help="report inverted polarity but do not correct it")
     args = ap.parse_args()
-    missing = [p for p in [args.reference, *args.tracks] if not p.is_file()]
-    if missing:
-        sys.exit("File not found: " + ", ".join(str(p) for p in missing)
-                 + "\nCheck the exact names (e.g. 'dir *.wav'), and put quotes around names with spaces.")
+    if not 0.1 <= args.interval <= 60:
+        ap.error("--interval must be between 0.1 and 60 seconds")
+    if not 0.02 <= args.max_offset <= 60:
+        ap.error("--max-offset must be between 0.02 and 60 seconds")
+    if not args.suffix:
+        ap.error("--suffix cannot be empty")
+    reference, tracks, ignored, folder = pick_files(args)
+    if folder is not None:
+        print(f"Using every WAV in {folder.resolve()}; the first by name is the reference.")
+    for p in ignored:
+        print(f"Ignoring already-synced file: {p.name}")
 
-    info = sf.info(str(args.reference))
-    sr = info.samplerate
     status("Reading reference...")
-    ref, _ = sf.read(str(args.reference), always_2d=True, dtype="float64")
-    n_out = len(ref)
-    ref_a = analysis_signal(ref, sr)
-    del ref
+    try:
+        info = sf.info(str(reference))
+        sr = info.samplerate
+        ref, _ = sf.read(str(reference), always_2d=True, dtype="float64")
+        n_out = len(ref)
+        if n_out < LOCK_S * sr:
+            raise ValueError(f"it is shorter than {LOCK_S:g} seconds")
+        ref_a = analysis_signal(ref, sr)
+        del ref
+    except Exception as e:  # unreadable, not audio, or too short to analyse
+        status()
+        sys.exit(f"Could not use {reference.name} as the reference: {e}")
     table, k = build_table()
     status()
 
-    lines = [f"Reference: {args.reference.name}  ({sr} Hz, {info.subtype}, {mmss(n_out, sr)})", ""]
+    lines = [f"Reference: {reference.name}  ({sr} Hz, {info.subtype}, {mmss(n_out, sr)})", ""]
     print(lines[0])
     failed = 0
-    for path in args.tracks:
-        t0 = time.time()
+    for path in tracks:
         print(f"\n{path.name}")
-        tinfo = sf.info(str(path))
-        if tinfo.samplerate != sr:
-            msg = f"  SKIPPED: sample rate is {tinfo.samplerate} Hz but the reference is {sr} Hz."
-            print(msg); lines += [path.name, msg, ""]; failed += 1
-            continue
-        status("  reading...")
-        x, _ = sf.read(str(path), always_2d=True, dtype="float64")
-        trk_a = analysis_signal(x, sr)
-        status("  measuring...")
-        starts, t1, d1, c1 = first_pass(ref_a, trk_a, sr, args.interval, args.max_offset)
-        voiced, m = len(starts), None
-        if len(t1):
-            pol = -1 if np.sum(c1) < 0 else 1
-            same = np.sign(c1) == pol
-            rough = runmed(d1[same], 4)
-            t, d = second_pass(ref_a, trk_a, sr, starts, lambda n: np.interp(n, t1[same], rough), pol)
-            if len(t):
-                m = fit(t, d, n_out, sr, args.steady)
-        if m is None:
-            status()
-            msg = "  SKIPPED: could not find a reliable match with the reference."
-            print(msg); lines += [path.name, msg, ""]; failed += 1
-            continue
-
-        y = warp(x, m["curve"], n_out, table, k, progress=lambda done: status(f"  resampling... {done:.0%}"))
-        flipped = pol < 0 and not args.no_flip
-        if flipped:
-            y = -y
-        out_path = path.with_name(f"{path.stem}-{args.suffix}{path.suffix}")
-        status("  writing...")
-        sf.write(str(out_path), y, sr, subtype=tinfo.subtype, format=tinfo.format)
+        try:
+            ok, rep = sync_track(path, ref_a, n_out, sr, table, k, args)
+        except Exception as e:  # one bad file should not stop the others
+            ok, rep = False, [f"  SKIPPED: could not process this file ({type(e).__name__}: {e})"]
         status()
-
-        ms = lambda s: s / sr * 1000
-        how = {"follow": "clock drift + following your movement", "steady": "clock drift only (--steady)",
-               "fixed": "fixed offset (too little speech to measure drift)"}
-        rep = [
-            f"  start offset : {ms(m['start']):+.2f} ms ({m['start']:+.1f} samples)",
-            f"  end offset   : {ms(m['end']):+.2f} ms ({m['end']:+.1f} samples)",
-            f"  clock drift  : {ms(m['slope'] * n_out):+.2f} ms over the take ({m['slope'] * 1e6:+.2f} ppm)",
-            f"  movement     : offset wanders +/-{m['move']:.1f} samples around the drift line",
-            f"  polarity     : " + ("normal" if pol > 0 else "INVERTED" + (" (corrected)" if flipped else " (left as is)")),
-            f"  correction   : {how[m['mode']]}",
-            f"  measurements : {m['used']} of {voiced} windows used, scatter {m['scatter']:.1f} samples",
-        ]
-        for a, b, v in m["shifts"]:
-            rep.append(f"  NOTE: {mmss(a, sr)}-{mmss(b, sr)} offset shifted {v:+.0f} samples ({ms(v):+.2f} ms) from the drift line"
-                       + (" (not followed with --steady)" if m["mode"] == "steady" else " (followed)"))
-        if m["shifts"]:
-            rep.append("        Usually you moving relative to the mics. If you didn't move, check for a click where it starts.")
-        if m["used"] < voiced // 2:
-            rep.append("  WARNING: fewer than half the windows matched - check this track by ear")
-        rep.append(f"  wrote        : {out_path.name}  ({time.time() - t0:.0f} s)")
+        failed += not ok
         print("\n".join(rep))
         lines += [path.name] + rep + [""]
 
-    report = args.reference.with_name(f"{args.reference.stem}-sync-report.txt")
+    report = reference.with_name(f"{reference.stem}-sync-report.txt")
     report.write_text("\n".join(lines), encoding="utf-8")
     print(f"\nReport: {report.name}")
     return 1 if failed else 0

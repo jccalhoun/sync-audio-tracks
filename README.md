@@ -26,13 +26,27 @@ python -m pip install --user numpy scipy soundfile
 
 ## Usage
 
-Put the script in the folder with your recordings and list the reference mic first, then the others:
+**Simplest: put one take's recordings in a folder with the script and run it with no file names.**
 
 ```
-python micsync.py "Track 1_001.wav" "Track 2_001.wav" "Track 3_001.wav" "Track 4_001.wav"
+python micsync.py
 ```
 
-Put quotes around file names that contain spaces. Audition's default names do.
+It syncs every WAV file in the folder. The first file by name is the reference (`Track 1_001.wav` comes before `Track 2_001.wav`, and `Track 2` before `Track 10`). Files already ending in `-synced` are ignored, so you can run it again safely. You can also point it at another folder:
+
+```
+python micsync.py "C:\recordings\take 3"
+```
+
+Keep one take per folder. Files from a different take can't be matched to the reference, so they would be skipped after wasting some time.
+
+**To choose the reference or the files yourself,** list the reference mic first, then the others:
+
+```
+python micsync.py "Track 4_001.wav" "Track 1_001.wav" "Track 2_001.wav"
+```
+
+Put quotes around file names that contain spaces. Audition's default names do. Wildcards such as `"Track ?_001.wav"` also work, including on Windows.
 
 While it runs, a status line shows what it's doing for each track (reading, measuring, then resampling with a percentage). Expect roughly 30 seconds per track for an 8-minute take.
 
@@ -44,8 +58,8 @@ The reference is the mic every other track is matched to. Any mic works; the one
 |---|---|---|
 | `--steady` | off | Correct clock drift only. Don't follow offset changes caused by movement. |
 | `--no-flip` | off | Report an inverted-polarity mic, but don't flip it. |
-| `--interval SECONDS` | 1 | Time between measurements. |
-| `--max-offset SECONDS` | 1 | Largest starting offset to search for. |
+| `--interval SECONDS` | 1 | Time between measurements (0.1 to 60). |
+| `--max-offset SECONDS` | 1 | Largest starting offset to search for (0.02 to 60). Raise it if a mic starts more than a second away from the reference. |
 | `--suffix TEXT` | `synced` | Added to the output file names. |
 
 ## Output
@@ -79,8 +93,8 @@ Track 2_001.wav
 | polarity | `INVERTED` means this mic's signal was upside down relative to the reference. It's flipped back unless you use `--no-flip`. |
 | measurements | How many one-second windows gave a usable match, and how consistent they were. Silent stretches aren't counted. |
 | NOTE | A stretch where the offset sat noticeably away from the drift line. This is usually you leaning or turning: about 1 ms is roughly 34 cm (a foot) of change in distance between two mics. If you didn't move, listen for a click where it starts, which would mean the device dropped a few samples. |
-| WARNING | Fewer than half the windows matched. Check that track by ear. |
-| SKIPPED | The track couldn't be matched to the reference at all (for example, a file from a different take), or its sample rate differs. No synced file is written for it. |
+| WARNING | Either fewer than half the windows matched (check that track by ear), or samples clipped when writing a 16- or 24-bit file. Clipping can't happen with 32-bit float files. |
+| SKIPPED | No synced file was written for this track. The line says why: it couldn't be matched to the reference (for example, a file from a different take), its sample rate differs, or the file is unreadable or too short. The other tracks still finish. |
 
 ## How it works
 
