@@ -43,6 +43,7 @@ MIN_CONF2 = 0.50   # minimum correlation to use a second-pass window
 TOL_S = 8 / 48000  # seconds (8 samples at 48 kHz): further than this from the drift line counts as "shifted"
 RUN = 5            # report a shift only if it lasts at least this many windows
 MOVE_S = 0.001     # offset changes up to this (seconds) are always followed; larger ones only if steady
+STEP_S = 0.003     # a steady shift larger than this (seconds, ~1 m) is too big to be movement
 FOLLOW = 2         # follow the offset using the median of +/- this many neighbouring windows
 TAPS = 64          # resampling filter length
 PHASES = 512       # resampling filter sub-sample resolution
@@ -64,6 +65,15 @@ def analysis_signal(x, sr):
     mono = x.mean(axis=1)
     sos = signal.butter(4, [200, min(8000, sr * 0.45)], btype="band", fs=sr, output="sos")
     return signal.sosfiltfilt(sos, mono).astype(np.float32)
+
+
+def rms(x, block=1_000_000):
+    """Root-mean-square level, computed in blocks so no full-size copy is made."""
+    total = 0.0
+    for a in range(0, len(x), block):
+        part = x[a:a + block].astype(np.float64)
+        total += float(np.dot(part, part))
+    return float(np.sqrt(total / max(len(x), 1)))
 
 
 def segment(x, start, length):
@@ -106,11 +116,10 @@ def measure(ref_a, trk_a, start, win, d_pred, margin, pol=0):
 def first_pass(ref_a, trk_a, sr, interval, max_offset):
     """Rough offsets through the take, polarity unknown. Returns (starts, t, d, conf)."""
     win, lock_win = int(WIN_S * sr), int(LOCK_S * sr)
-    gate = 0.1 * np.sqrt(np.mean(ref_a.astype(np.float64) ** 2))
+    gate = 0.1 * rms(ref_a)
     starts, out, recent, misses = [], [], [], 0
     for start in range(0, max(len(ref_a) - win, 1), int(interval * sr)):
-        r = ref_a[start:start + win]
-        if np.sqrt(np.mean(r.astype(np.float64) ** 2)) < gate:
+        if rms(ref_a[start:start + win]) < gate:
             continue  # reference is silent here, nothing to match
         starts.append(start)
         if not recent:  # no idea yet: long window, wide search
@@ -270,27 +279,34 @@ def natural_key(path):
 
 def pick_files(args):
     """Work out the reference and the other tracks from the command line.
-    Returns (reference, tracks, ignored, folder or None)."""
+    Returns (reference, tracks, ignored, folder or None).
+    Files found by folder mode or a wildcard are dropped if they already end in
+    -<suffix>; a file named explicitly is always used as given."""
     given, folder = list(args.files), None
+    found = []  # (path, named explicitly?)
     if not given or (len(given) == 1 and given[0].is_dir()):
         folder = given[0] if given else Path(".")
-        files = sorted((p for p in folder.iterdir() if p.is_file() and p.suffix.lower() == ".wav"), key=natural_key)
+        found = [(p, False) for p in sorted((q for q in folder.iterdir() if q.is_file() and q.suffix.lower() == ".wav"),
+                                            key=natural_key)]
     else:
-        files = []
         for p in given:  # Windows does not expand *.wav itself, so do it here
-            wild = any(ch in str(p) for ch in "*?")
-            files += sorted((Path(m) for m in glob.glob(str(p))), key=natural_key) if wild else [p]
-        missing = [p for p in files if not p.is_file()]
+            if any(ch in str(p) for ch in "*?"):
+                matches = sorted((Path(m) for m in glob.glob(str(p))), key=natural_key)
+                if not matches:
+                    sys.exit(f"No files match {p}")
+                found += [(m, False) for m in matches]
+            else:
+                found.append((p, True))
+        missing = [p for p, _ in found if not p.is_file()]
         if missing:
             sys.exit("File not found: " + ", ".join(str(p) for p in missing)
                      + "\nCheck the exact names (e.g. 'dir *.wav'), and put quotes around names with spaces.")
-    seen, unique = set(), []
-    for p in files:
-        if p.resolve() not in seen:
-            seen.add(p.resolve())
-            unique.append(p)
-    ignored = [p for p in unique if p.stem.endswith(f"-{args.suffix}")]
-    files = [p for p in unique if p not in ignored]
+    seen, files, ignored = set(), [], []
+    for p, named in found:
+        if p.resolve() in seen:
+            continue
+        seen.add(p.resolve())
+        (ignored if p.stem.endswith(f"-{args.suffix}") and not named else files).append(p)
     if len(files) < 2:
         where = f"in {folder.resolve()}" if folder is not None else "on the command line"
         sys.exit(f"Need a reference and at least one other WAV file, but found {len(files)} {where}"
@@ -346,11 +362,18 @@ def sync_track(path, ref_a, n_out, sr, table, k, args):
         f"  correction   : {how[m['mode']]}",
         f"  measurements : {m['used']} of {voiced} windows used, scatter {m['scatter']:.1f} samples",
     ]
-    for a, b, v in m["shifts"]:
+    moved = [x for x in m["shifts"] if abs(x[2]) <= STEP_S * sr]
+    stepped = [x for x in m["shifts"] if abs(x[2]) > STEP_S * sr]
+    for a, b, v in moved:
         rep.append(f"  NOTE: {mmss(a, sr)}-{mmss(b, sr)} offset shifted {v:+.0f} samples ({ms(v):+.2f} ms) from the drift line"
                    + (" (not followed with --steady)" if m["mode"] == "steady" else " (followed)"))
-    if m["shifts"]:
+    if moved:
         rep.append("        Usually you moving relative to the mics. If you didn't move, check for a click where it starts.")
+    for a, b, v in stepped:
+        rep.append(f"  WARNING: {mmss(a, sr)}-{mmss(b, sr)} offset stepped {v:+.0f} samples ({ms(v):+.2f} ms) from the drift line"
+                   + (" (not followed with --steady)" if m["mode"] == "steady" else " (followed)"))
+    if stepped:
+        rep.append("           Too large to be movement: likely dropped or repeated audio. Listen where it starts and ends.")
     if m["used"] < voiced // 2:
         rep.append("  WARNING: fewer than half the windows matched - check this track by ear")
     if clipped:

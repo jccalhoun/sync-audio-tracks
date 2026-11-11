@@ -46,7 +46,7 @@ Keep one take per folder. Files from a different take can't be matched to the re
 python micsync.py "Track 4_001.wav" "Track 1_001.wav" "Track 2_001.wav"
 ```
 
-Put quotes around file names that contain spaces. Audition's default names do. Wildcards such as `"Track ?_001.wav"` also work, including on Windows.
+Put quotes around file names that contain spaces. Audition's default names do. Wildcards such as `"Track ?_001.wav"` also work, including on Windows. A file you name explicitly is always used, even one ending in `-synced`; only folder mode and wildcards skip those.
 
 While it runs, a status line shows what it's doing for each track (reading, measuring, then resampling with a percentage). Expect roughly 30 seconds per track for an 8-minute take.
 
@@ -92,8 +92,8 @@ Track 2_001.wav
 | movement | Typical offset change from you moving, on top of the drift. |
 | polarity | `INVERTED` means this mic's signal was upside down relative to the reference. It's flipped back unless you use `--no-flip`. |
 | measurements | How many one-second windows gave a usable match, and how consistent they were. Silent stretches aren't counted. |
-| NOTE | A stretch where the offset sat noticeably away from the drift line. This is usually you leaning or turning: about 1 ms is roughly 34 cm (a foot) of change in distance between two mics. If you didn't move, listen for a click where it starts, which would mean the device dropped a few samples. |
-| WARNING | Either fewer than half the windows matched (check that track by ear), or samples clipped when writing a 16- or 24-bit file. Clipping can't happen with 32-bit float files. |
+| NOTE | A stretch where the offset sat noticeably away from the drift line, by up to 3 ms. This is usually you leaning or turning: about 1 ms is roughly 34 cm (a foot) of change in distance between two mics. If you didn't move, listen for a click where it starts, which would mean the device dropped a few samples. |
+| WARNING | One of three things. Fewer than half the windows matched: check that track by ear. The offset stepped by more than 3 ms and stayed there: that's too large to be movement, so the device probably dropped or repeated audio; listen where the stretch starts and ends. Or samples clipped when writing a 16- or 24-bit file, which can't happen with 32-bit float files. |
 | SKIPPED | No synced file was written for this track. The line says why: it couldn't be matched to the reference (for example, a file from a different take), its sample rate differs, or the file is unreadable or too short. The other tracks still finish. |
 
 ## How it works
