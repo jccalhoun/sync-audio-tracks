@@ -24,7 +24,24 @@ On Windows, if the install fails with a permissions error such as `[WinError 2] 
 python -m pip install --user numpy scipy soundfile
 ```
 
-## Usage
+## Using the window
+
+Double-click `micsync_gui.pyw` (keep it in the same folder as `micsync.py`), or run `python micsync_gui.pyw`.
+
+1. **Add the recordings of one take.** Use *Add files...* or *Add folder...*, or drag the files or the folder onto the window. Adding a folder skips files already ending in `-synced`.
+2. **Choose the reference.** The first file is the reference to start with. To change it, double-click another file, or select it and press *Use as reference*.
+3. **Choose where to save.** Either next to the original files, or in a folder you pick.
+4. **Press Sync.** The bar shows progress, the report appears below, and *Open output folder* takes you to the results. *Cancel* stops after the current step; tracks already finished are kept.
+
+The two checkboxes match the command-line options: unticking *Follow movement between mics* is `--steady`, and unticking *Correct inverted polarity* is `--no-flip`.
+
+Drag and drop needs one extra library. Without it the window works the same, using the buttons:
+
+```
+python -m pip install tkinterdnd2
+```
+
+## Command-line usage
 
 **Simplest: put one take's recordings in a folder with the script and run it with no file names.**
 
@@ -56,6 +73,7 @@ The reference is the mic every other track is matched to. Any mic works; the one
 
 | Option | Default | What it does |
 |---|---|---|
+| `--out FOLDER` | next to the originals | Write the synced files and the report to this folder. It is created if missing. |
 | `--steady` | off | Correct clock drift only. Don't follow offset changes caused by movement. |
 | `--no-flip` | off | Report an inverted-polarity mic, but don't flip it. |
 | `--interval SECONDS` | 1 | Time between measurements (0.1 to 60). |

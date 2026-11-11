@@ -13,6 +13,7 @@ Usage:
     python micsync.py                                   every WAV in this folder
     python micsync.py FOLDER                            every WAV in FOLDER
     python micsync.py REFERENCE.wav MIC2.wav MIC3.wav   named files
+    python micsync_gui.pyw                              the same in a window
 
 With no file names, the first WAV in the folder (by name) is the reference
 and files already ending in -synced are ignored. Keep one take per folder.
@@ -48,6 +49,10 @@ FOLLOW = 2         # follow the offset using the median of +/- this many neighbo
 TAPS = 64          # resampling filter length
 PHASES = 512       # resampling filter sub-sample resolution
 CHUNK = 100_000    # samples resampled per batch (memory vs speed)
+
+
+class SyncError(Exception):
+    """The run cannot go ahead at all (e.g. the reference file is unusable)."""
 
 
 def status(msg=""):
@@ -314,18 +319,22 @@ def pick_files(args):
     return files[0], files[1:], ignored, folder
 
 
-def sync_track(path, ref_a, n_out, sr, table, k, args):
-    """Sync one track and write it. Returns (ok, report lines)."""
+def sync_track(path, out_path, ref_a, n_out, sr, table, k, args, show=status, tick=None):
+    """Sync one track and write it to out_path. Returns (ok, report lines).
+    show(text) reports what is happening; tick(0..1) reports how far along this track is."""
+    tick = tick or (lambda done: None)
     t0 = time.time()
     tinfo = sf.info(str(path))
     if tinfo.samplerate != sr:
         return False, [f"  SKIPPED: sample rate is {tinfo.samplerate} Hz but the reference is {sr} Hz."]
-    status("  reading...")
+    show("  reading...")
+    tick(0.0)
     x, _ = sf.read(str(path), always_2d=True, dtype="float64")
     if len(x) < WIN_S * sr:
         return False, [f"  SKIPPED: the file is shorter than {WIN_S:g} second."]
     trk_a = analysis_signal(x, sr)
-    status("  measuring...")
+    show("  measuring...")
+    tick(0.3)
     starts, t1, d1, c1 = first_pass(ref_a, trk_a, sr, args.interval, args.max_offset)
     voiced, m = len(starts), None
     if len(t1):
@@ -340,14 +349,17 @@ def sync_track(path, ref_a, n_out, sr, table, k, args):
                        f"           If this mic starts more than {args.max_offset:g} s before or after the reference,",
                        "           try a larger --max-offset. Otherwise it may be from a different take."]
 
-    y = warp(x, m["curve"], n_out, table, k, progress=lambda done: status(f"  resampling... {done:.0%}"))
+    def resampling(done):
+        show(f"  resampling... {done:.0%}")
+        tick(0.4 + 0.6 * done)
+
+    y = warp(x, m["curve"], n_out, table, k, progress=resampling)
     flipped = pol < 0 and not args.no_flip
     if flipped:
         y = -y
     peak = float(np.max(np.abs(y))) if len(y) else 0.0
     clipped = int(np.sum(np.abs(y) > 1.0)) if tinfo.subtype not in ("FLOAT", "DOUBLE") else 0
-    out_path = path.with_name(f"{path.stem}-{args.suffix}{path.suffix}")
-    status("  writing...")
+    show("  writing...")
     sf.write(str(out_path), y, sr, subtype=tinfo.subtype, format=tinfo.format)
 
     ms = lambda s: s / sr * 1000
@@ -383,12 +395,81 @@ def sync_track(path, ref_a, n_out, sr, table, k, args):
     return True, rep
 
 
+def sync_files(reference, tracks, args, out_dir=None, say=print, show=status, tick=None):
+    """Sync `tracks` to `reference` and write the report. Returns how many tracks were skipped.
+
+    args     needs .interval, .max_offset, .suffix, .steady and .no_flip
+    out_dir  folder for the synced files and the report (default: next to the originals)
+    say      called with each block of report text as it is ready
+    show     called with a short progress message ("" clears it)
+    tick     called with overall progress, 0..1
+    Raises SyncError if the reference cannot be used."""
+    reference, tracks = Path(reference), [Path(p) for p in tracks]
+    out_dir = Path(out_dir) if out_dir else None
+    tick = tick or (lambda done: None)
+    show("Reading reference...")
+    tick(0.0)
+    try:
+        info = sf.info(str(reference))
+        sr = info.samplerate
+        ref, _ = sf.read(str(reference), always_2d=True, dtype="float64")
+        n_out = len(ref)
+        if n_out < LOCK_S * sr:
+            raise ValueError(f"it is shorter than {LOCK_S:g} seconds")
+        ref_a = analysis_signal(ref, sr)
+        del ref
+    except Exception as e:  # unreadable, not audio, or too short to analyse
+        show("")
+        raise SyncError(f"Could not use {reference.name} as the reference: {e}") from e
+    if out_dir:
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            show("")
+            raise SyncError(f"Could not create the output folder {out_dir}: {e}") from e
+    table, k = build_table()
+    show("")
+
+    lines = [f"Reference: {reference.name}  ({sr} Hz, {info.subtype}, {mmss(n_out, sr)})", ""]
+    say(lines[0])
+    inputs = {p.resolve() for p in [reference, *tracks]}
+    written, failed = set(), 0
+    for i, path in enumerate(tracks):
+        say(f"\n{path.name}")
+        out_path = (out_dir or path.parent) / f"{path.stem}-{args.suffix}{path.suffix}"
+        n = 2
+        while out_path.resolve() in written:  # two inputs with the same name going to one folder
+            out_path = out_path.with_name(f"{path.stem}-{args.suffix} ({n}){path.suffix}")
+            n += 1
+        if out_path.resolve() in inputs:
+            ok, rep = False, [f"  SKIPPED: the result would overwrite {out_path.name}, which is one of the input files."]
+        else:
+            try:
+                ok, rep = sync_track(path, out_path, ref_a, n_out, sr, table, k, args, show,
+                                     lambda done: tick((i + done) / len(tracks)))
+            except Exception as e:  # one bad file should not stop the others
+                ok, rep = False, [f"  SKIPPED: could not process this file ({type(e).__name__}: {e})"]
+        show("")
+        if ok:
+            written.add(out_path.resolve())
+        failed += not ok
+        say("\n".join(rep))
+        lines += [path.name] + rep + [""]
+    tick(1.0)
+
+    report = (out_dir or reference.parent) / f"{reference.stem}-sync-report.txt"
+    report.write_text("\n".join(lines), encoding="utf-8")
+    say(f"\nReport: {report.name}")
+    return failed
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="Sync multiple mics of the same voice to a reference mic.",
         epilog="With no files, every WAV in the current folder is used and the first by name is the reference.")
     ap.add_argument("files", type=Path, nargs="*", metavar="FILE",
                     help="reference mic first, then the other mics; or one folder; or nothing for the current folder")
+    ap.add_argument("--out", type=Path, metavar="FOLDER", help="write the synced files and report here (default: next to the originals)")
     ap.add_argument("--interval", type=float, default=1.0, help="seconds between measurements (default 1)")
     ap.add_argument("--max-offset", type=float, default=1.0, help="largest start offset to search for, seconds (default 1)")
     ap.add_argument("--suffix", default="synced", help="added to output file names (default: synced)")
@@ -406,40 +487,10 @@ def main():
         print(f"Using every WAV in {folder.resolve()}; the first by name is the reference.")
     for p in ignored:
         print(f"Ignoring already-synced file: {p.name}")
-
-    status("Reading reference...")
     try:
-        info = sf.info(str(reference))
-        sr = info.samplerate
-        ref, _ = sf.read(str(reference), always_2d=True, dtype="float64")
-        n_out = len(ref)
-        if n_out < LOCK_S * sr:
-            raise ValueError(f"it is shorter than {LOCK_S:g} seconds")
-        ref_a = analysis_signal(ref, sr)
-        del ref
-    except Exception as e:  # unreadable, not audio, or too short to analyse
-        status()
-        sys.exit(f"Could not use {reference.name} as the reference: {e}")
-    table, k = build_table()
-    status()
-
-    lines = [f"Reference: {reference.name}  ({sr} Hz, {info.subtype}, {mmss(n_out, sr)})", ""]
-    print(lines[0])
-    failed = 0
-    for path in tracks:
-        print(f"\n{path.name}")
-        try:
-            ok, rep = sync_track(path, ref_a, n_out, sr, table, k, args)
-        except Exception as e:  # one bad file should not stop the others
-            ok, rep = False, [f"  SKIPPED: could not process this file ({type(e).__name__}: {e})"]
-        status()
-        failed += not ok
-        print("\n".join(rep))
-        lines += [path.name] + rep + [""]
-
-    report = reference.with_name(f"{reference.stem}-sync-report.txt")
-    report.write_text("\n".join(lines), encoding="utf-8")
-    print(f"\nReport: {report.name}")
+        failed = sync_files(reference, tracks, args, args.out)
+    except SyncError as e:
+        sys.exit(str(e))
     return 1 if failed else 0
 
 
