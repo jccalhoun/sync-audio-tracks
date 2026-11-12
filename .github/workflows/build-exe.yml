@@ -1,0 +1,66 @@
+name: Build Windows app
+
+# Builds micsync-gui.exe (the window) and micsync.exe (command line), tests both,
+# and keeps them as a downloadable artifact. Pushing a tag like v1.0.0 also
+# publishes them as a GitHub Release.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths: ['micsync.py', 'micsync_gui.pyw', 'tests/**', '.github/workflows/build-exe.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install libraries
+        run: python -m pip install numpy scipy soundfile tkinterdnd2 pyinstaller
+
+      - name: Test the script before packaging
+        shell: bash
+        run: |
+          python tests/smoke_make.py smoke
+          python micsync.py "smoke/ref.wav" "smoke/mic 2.wav" --out smoke/out-py
+          python tests/smoke_check.py smoke smoke/out-py
+
+      - name: Build the two programs
+        run: |
+          pyinstaller --noconfirm --clean --onefile --windowed --name micsync-gui --collect-all tkinterdnd2 micsync_gui.pyw
+          pyinstaller --noconfirm --clean --onefile --console --name micsync micsync.py
+
+      - name: Test micsync.exe
+        shell: bash
+        run: |
+          ./dist/micsync.exe "smoke/ref.wav" "smoke/mic 2.wav" --out smoke/out-exe
+          python tests/smoke_check.py smoke smoke/out-exe
+
+      - name: Test micsync-gui.exe
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath dist\micsync-gui.exe -ArgumentList '--selftest' -Wait -PassThru
+          Write-Host "self-test exit code: $($p.ExitCode)  (0 = fine, 1 = libraries missing, 2 = no drag and drop)"
+          if ($p.ExitCode -ne 0) { exit 1 }
+          Get-ChildItem dist\*.exe | ForEach-Object { "{0}  {1:N1} MB" -f $_.Name, ($_.Length / 1MB) }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: micsync-windows
+          path: dist/*.exe
+
+      - name: Publish a release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/micsync-gui.exe dist/micsync.exe --title "micsync $GITHUB_REF_NAME" --generate-notes

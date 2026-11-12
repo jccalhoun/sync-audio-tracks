@@ -9,7 +9,18 @@ It was built for a setup where several USB mics (including wireless lapel mics) 
 
 Blended mics start to sound hollow with well under 1 ms of error, so `micsync.py` measures the offset to the sample every second through the take and resamples each track so it stays locked to a reference mic from start to finish.
 
+## Windows app (no Python needed)
+
+Download `micsync-gui.exe` from the [Releases page](https://github.com/jccalhoun/sync-audio-tracks/releases) and double-click it. It is the same window described below, with Python and every library packed inside, including drag and drop. `micsync.exe` is the command-line version.
+
+- The app takes a few seconds to appear, because it unpacks itself each time it starts.
+- It isn't code-signed, so Windows SmartScreen may show "Windows protected your PC" the first time. Choose **More info**, then **Run anyway**. Some antivirus programs are also suspicious of apps packaged this way.
+
+Both programs are built and tested automatically on GitHub from the code in this repository (see `.github/workflows/build-exe.yml`).
+
 ## Requirements
+
+*Only needed to run the Python scripts. The Windows app needs nothing installed.*
 
 - Python 3.9 or newer
 - numpy, scipy and soundfile:

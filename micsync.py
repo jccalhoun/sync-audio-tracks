@@ -58,7 +58,7 @@ class SyncError(Exception):
 def status(msg=""):
     """Show progress on one line that keeps overwriting itself; status() clears it.
     Does nothing when the output is not a terminal (e.g. redirected to a file)."""
-    if sys.stdout.isatty():
+    if sys.stdout is not None and sys.stdout.isatty():  # stdout is None in a windowed app
         sys.stdout.write("\r" + msg.ljust(50) + ("" if msg else "\r"))
         sys.stdout.flush()
 

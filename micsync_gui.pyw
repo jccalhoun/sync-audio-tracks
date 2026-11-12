@@ -370,7 +370,21 @@ class App:
         self.root.destroy()
 
 
+def selftest():
+    """Used by the automated build: open the window briefly and report what works.
+    Exit code 0 = fine, 1 = micsync or its libraries failed to load, 2 = no drag and drop."""
+    if IMPORT_ERROR is not None:
+        return 1
+    root = TkinterDnD.Tk() if HAVE_DND else tk.Tk()
+    app = App(root)
+    root.update()
+    app.on_close()
+    return 0 if HAVE_DND else 2
+
+
 def main():
+    if "--selftest" in sys.argv[1:]:
+        return selftest()
     root = TkinterDnD.Tk() if HAVE_DND else tk.Tk()
     if IMPORT_ERROR is not None:
         root.withdraw()
