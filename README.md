@@ -11,7 +11,7 @@ Blended mics start to sound hollow with well under 1 ms of error, so `micsync.py
 
 ## Windows app (no Python needed)
 
-Download `micsync-gui.exe` from the [Releases page](https://github.com/jccalhoun/sync-audio-tracks/releases) and double-click it. It is the same window described below, with Python and every library packed inside, including drag and drop. `micsync.exe` is the command-line version.
+Download `micsync-gui.exe` from the [Releases page](https://github.com/jccalhoun/sync-audio-tracks/releases) and double-click it. (The newest build is also under [Actions](https://github.com/jccalhoun/sync-audio-tracks/actions): open the latest successful run and download `micsync-windows` at the bottom of the page. That needs a GitHub login.) It is the same window described below, with Python and every library packed inside, including drag and drop. `micsync.exe` is the command-line version.
 
 - The app takes a few seconds to appear, because it unpacks itself each time it starts.
 - It isn't code-signed, so Windows SmartScreen may show "Windows protected your PC" the first time. Choose **More info**, then **Run anyway**. Some antivirus programs are also suspicious of apps packaged this way.

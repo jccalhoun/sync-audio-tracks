@@ -1,8 +1,9 @@
 name: Build Windows app
 
 # Builds micsync-gui.exe (the window) and micsync.exe (command line), tests both,
-# and keeps them as a downloadable artifact. Pushing a tag like v1.0.0 also
-# publishes them as a GitHub Release.
+# and keeps them as a downloadable artifact. A tag like v1.0.0 (pushed with git,
+# or made by creating a release on the GitHub website) also attaches them to
+# that release.
 
 on:
   push:
@@ -63,4 +64,10 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/micsync-gui.exe dist/micsync.exe --title "micsync $GITHUB_REF_NAME" --generate-notes
+        run: |
+          # Works both ways: a tag pushed with git, or a release created on the GitHub website.
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/micsync-gui.exe dist/micsync.exe --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/micsync-gui.exe dist/micsync.exe --title "micsync $GITHUB_REF_NAME" --generate-notes
+          fi
