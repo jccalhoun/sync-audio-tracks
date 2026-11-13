@@ -11,12 +11,17 @@ Blended mics start to sound hollow with well under 1 ms of error, so `micsync.py
 
 ## Windows app (no Python needed)
 
-Download `micsync-gui.exe` from the [Releases page](https://github.com/jccalhoun/sync-audio-tracks/releases) and double-click it. (The newest build is also under [Actions](https://github.com/jccalhoun/sync-audio-tracks/actions): open the latest successful run and download `micsync-windows` at the bottom of the page. That needs a GitHub login.) It is the same window described below, with Python and every library packed inside, including drag and drop. `micsync.exe` is the command-line version.
+1. Download `micsync-windows.zip` from the [Releases page](https://github.com/jccalhoun/sync-audio-tracks/releases).
+2. Unzip it anywhere. You get a `micsync` folder.
+3. Double-click `micsync-gui.exe` inside that folder.
 
-- The app takes a few seconds to appear, because it unpacks itself each time it starts.
-- It isn't code-signed, so Windows SmartScreen may show "Windows protected your PC" the first time. Choose **More info**, then **Run anyway**. Some antivirus programs are also suspicious of apps packaged this way.
+It is the same window described below, with Python and every library included, drag and drop too. `micsync.exe` in the same folder is the command-line version.
 
-Both programs are built and tested automatically on GitHub from the code in this repository (see `.github/workflows/build-exe.yml`).
+- **Keep the folder together.** Both programs need the `_internal` folder beside them. To start the app from somewhere else, make a shortcut: right-click `micsync-gui.exe`, then **Send to**, then **Desktop (create shortcut)**.
+- **The window opens straight away;** the audio libraries finish loading a moment later, and *Sync* becomes available when they have.
+- **It isn't code-signed,** so Windows SmartScreen may show "Windows protected your PC" the first time. Choose **More info**, then **Run anyway**. Some antivirus programs are also suspicious of apps packaged this way.
+
+The newest build is also under [Actions](https://github.com/jccalhoun/sync-audio-tracks/actions): open the latest successful run and download `micsync-windows` at the bottom of the page (needs a GitHub login). Both programs are built and tested automatically from the code in this repository (see `.github/workflows/build-exe.yml` and `micsync.spec`).
 
 ## Requirements
 

@@ -12,9 +12,11 @@ Drag and drop also needs (optional):         pip install tkinterdnd2
 """
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -26,14 +28,17 @@ try:  # optional: without it everything works except drag and drop
 except Exception:
     HAVE_DND = False
 
+STARTED = time.perf_counter()
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-try:
-    import micsync
-    IMPORT_ERROR = None
-except Exception as e:  # numpy/scipy/soundfile missing, or micsync.py not next to this file
-    micsync, IMPORT_ERROR = None, e
-
+micsync = None   # loaded in the background by App.load_engine, so the window appears at once
 SUFFIX = "synced"
+LOAD_HELP = ("Keep micsync.py in the same folder as this file, and install the libraries with:\n\n"
+             "python -m pip install numpy scipy soundfile")
+
+
+def natural_key(path):
+    """Sort 'Track 2' before 'Track 10'."""
+    return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", path.name)]
 
 
 class Cancelled(BaseException):
@@ -50,6 +55,7 @@ class App:
         self.cancel = threading.Event()
         self.events = queue.Queue()
         self.last_out = None     # folder to open when a run finishes
+        self.engine = "loading"  # "loading", "ready" or "failed"
 
         root.title("micsync - sync multi-mic recordings")
         root.minsize(720, 560)
@@ -153,7 +159,20 @@ class App:
 
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.refresh()
+        self.loader = threading.Thread(target=self.load_engine, daemon=True)
+        self.loader.start()
         self.root.after(100, self.poll)
+
+    def load_engine(self):
+        """Import micsync (and with it numpy, scipy and soundfile) off the main thread.
+        They take a second or more to load; the window is usable for adding files meanwhile."""
+        global micsync
+        try:
+            import micsync as engine
+            micsync = engine
+            self.events.put(("engine", None))
+        except Exception as e:  # a library is missing, or micsync.py is not next to this file
+            self.events.put(("engine", e))
 
     # ------------------------------------------------------------ the file list
 
@@ -165,7 +184,7 @@ class App:
             p = Path(raw)
             if p.is_dir():
                 found = sorted((q for q in p.iterdir() if q.is_file() and q.suffix.lower() == ".wav"
-                                and not q.stem.endswith(f"-{SUFFIX}")), key=micsync.natural_key)
+                                and not q.stem.endswith(f"-{SUFFIX}")), key=natural_key)
             elif p.is_file() and p.suffix.lower() == ".wav":
                 found = [p]
             else:
@@ -232,11 +251,15 @@ class App:
         folder = self.out_mode.get() == "folder" and not busy
         self.out_entry.configure(state="normal" if folder else "disabled")
         self.out_browse.configure(state="normal" if folder else "disabled")
-        self.sync_btn.configure(state="normal" if len(self.files) >= 2 and not busy else "disabled")
+        ready = self.engine == "ready"
+        self.sync_btn.configure(state="normal" if len(self.files) >= 2 and ready and not busy else "disabled")
         self.cancel_btn.configure(state="normal" if busy else "disabled")
         if not busy:
             n = len(self.files)
-            self.state.set("Add at least two files." if n < 2 else f"Ready: {n - 1} file(s) to sync to the reference.")
+            self.state.set("Could not load the audio libraries." if self.engine == "failed"
+                           else "Add at least two files." if n < 2
+                           else "Loading audio libraries..." if not ready
+                           else f"Ready: {n - 1} file(s) to sync to the reference.")
 
     # ------------------------------------------------------------------ output
 
@@ -262,7 +285,7 @@ class App:
         return self.worker is not None and self.worker.is_alive()
 
     def start(self):
-        if self.running() or len(self.files) < 2:
+        if self.running() or len(self.files) < 2 or self.engine != "ready":
             return
         out_dir = None
         if self.out_mode.get() == "folder":
@@ -329,6 +352,12 @@ class App:
                     self.state.set(value[:1].upper() + value[1:])
                 elif kind == "bar":
                     self.bar.configure(value=value)
+                elif kind == "engine":
+                    self.engine = "ready" if value is None else "failed"
+                    self.refresh()
+                    if value is not None:
+                        messagebox.showerror("micsync", "Could not load micsync.py or one of the libraries it needs:"
+                                                        f"\n\n{value}\n\n{LOAD_HELP}")
                 else:
                     self.worker.join(timeout=5)
                     self.refresh()
@@ -370,30 +399,28 @@ class App:
         self.root.destroy()
 
 
-def selftest():
-    """Used by the automated build: open the window briefly and report what works.
-    Exit code 0 = fine, 1 = micsync or its libraries failed to load, 2 = no drag and drop."""
-    if IMPORT_ERROR is not None:
-        return 1
+def selftest(timing_file=None):
+    """Used by the automated build: open the window, wait for the libraries, report what works.
+    Exit code 0 = fine, 1 = micsync or its libraries failed to load, 2 = no drag and drop.
+    With --selftest=FILE, also writes how long the window and the libraries took."""
     root = TkinterDnD.Tk() if HAVE_DND else tk.Tk()
     app = App(root)
     root.update()
+    window = time.perf_counter() - STARTED
+    app.loader.join(timeout=120)
+    loaded = micsync is not None
+    if timing_file:
+        Path(timing_file).write_text(f"window drawn after {window:.2f} s, libraries ready after "
+                                     f"{time.perf_counter() - STARTED:.2f} s (from program start)\n")
     app.on_close()
-    return 0 if HAVE_DND else 2
+    return 1 if not loaded else 0 if HAVE_DND else 2
 
 
 def main():
-    if "--selftest" in sys.argv[1:]:
-        return selftest()
+    for arg in sys.argv[1:]:
+        if arg == "--selftest" or arg.startswith("--selftest="):
+            return selftest(arg.partition("=")[2] or None)
     root = TkinterDnD.Tk() if HAVE_DND else tk.Tk()
-    if IMPORT_ERROR is not None:
-        root.withdraw()
-        messagebox.showerror(
-            "micsync",
-            f"Could not load micsync.py or one of the libraries it needs:\n\n{IMPORT_ERROR}\n\n"
-            "Keep micsync.py in the same folder as this file, and install the libraries with:\n\n"
-            "python -m pip install numpy scipy soundfile")
-        return 1
     App(root)
     root.mainloop()
     return 0
