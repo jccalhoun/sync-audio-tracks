@@ -53,15 +53,6 @@ jobs:
             if ($p.ExitCode -ne 0) { Write-Host "(0 = fine, 1 = libraries missing, 2 = no drag and drop)"; exit 1 }
           }
 
-      - name: TEMPORARY - time a single-file build for comparison
-        shell: pwsh
-        run: |
-          pyinstaller --noconfirm --onefile --windowed --name onefile-gui --collect-all tkinterdnd2 --distpath cmp --workpath cmpbuild --specpath cmpbuild micsync_gui.pyw | Out-Null
-          foreach ($i in 1..3) {
-            $t = Measure-Command { $p = Start-Process -FilePath cmp\onefile-gui.exe -ArgumentList '--selftest=selftest1.txt' -Wait -PassThru }
-            "single-file launch ${i}: exit code $($p.ExitCode), whole run $([math]::Round($t.TotalSeconds, 2)) s; $(Get-Content selftest1.txt)"
-          }
-
       - name: Zip the folder
         shell: pwsh
         run: |
